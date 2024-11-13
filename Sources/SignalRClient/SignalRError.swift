@@ -8,6 +8,8 @@ enum SignalRError: Error {
     case failedToDecodeResponseData
     case expectedHandshakeResponse
     case noHandshakeMessageReceived
+    case duplicatedStart
+    case unsupportedHandshakeVersion
 
     var localizedDescription: String {
         switch self {
@@ -23,6 +25,10 @@ enum SignalRError: Error {
             return "Expected a handshake response from the server."
         case .noHandshakeMessageReceived:
             return "No handshake message received."
+        case .duplicatedStart:
+            return "Start client while not in a disconnected state."
+        case .unsupportedHandshakeVersion:
+            return "Unsupported handshake version"
         }
     }
 }
