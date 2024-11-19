@@ -1,6 +1,6 @@
 import Foundation
 
-public class HubConnection: @unchecked Sendable {
+public actor HubConnection {
     private let defaultTimeout: TimeInterval = 30
     private let defaultPingInterval: TimeInterval = 15
 
@@ -15,8 +15,8 @@ public class HubConnection: @unchecked Sendable {
     private var connectionStarted: Bool = false
     private var receivedHandshakeResponse: Bool = false
     private var invocationId: Int = 0
-    private var handshakeResoler: ((String) -> Void)?
-    private var handshakeRejector: ((Error) -> Void)?
+    nonisolated(unsafe) private var handshakeResoler: ((HandshakeResponseMessage) -> Void)?
+    nonisolated(unsafe) private var handshakeRejector: ((Error) -> Void)?
 
     internal init(connection: HttpConnection,
                 logger: Logger,
@@ -133,7 +133,28 @@ public class HubConnection: @unchecked Sendable {
     }
 
     private func processHandshakeResponse(_ content: StringOrData) async throws -> StringOrData {
+        var remainingData: StringOrData?
+        var handshakeResponse: HandshakeResponseMessage
+
+        do {
+            (remainingData, handshakeResponse) = try HandshakeProtocol.parseHandshakeResponse(data: content)
+        } catch{
+            logger.log(level: .error, message: "Error parsing handshake response: \(error)")
+            handshakeRejector!(error)
+            throw error
+        }
         
+        if (handshakeResponse.error != nil) {
+            logger.log(level: .error, message: "Server returned handshake error: \(handshakeResponse.error!)") 
+            let error = SignalRError.handshakeError(handshakeResponse.error!)
+            handshakeRejector!(error)
+            throw error
+        } else {
+            logger.log(level: .debug, message: "Handshake compeleted")
+        }
+
+        handshakeResoler!(handshakeResponse)
+        return remainingData!
     }
 
     private actor ConnectionState {

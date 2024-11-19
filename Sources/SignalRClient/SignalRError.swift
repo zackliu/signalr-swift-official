@@ -10,6 +10,7 @@ enum SignalRError: Error {
     case noHandshakeMessageReceived
     case duplicatedStart
     case unsupportedHandshakeVersion
+    case handshakeError(String)
 
     var localizedDescription: String {
         switch self {
@@ -29,6 +30,8 @@ enum SignalRError: Error {
             return "Start client while not in a disconnected state."
         case .unsupportedHandshakeVersion:
             return "Unsupported handshake version"
+        case .handshakeError(let message):
+            return "Handshake error: \(message)"
         }
     }
 }
