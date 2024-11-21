@@ -1,5 +1,5 @@
 /// Defines properties common to all Hub messages.
-protocol HubMessage: Codable {
+public protocol HubMessage: Codable {
     /// A value indicating the type of this message.
     var type: MessageType { get }
 }

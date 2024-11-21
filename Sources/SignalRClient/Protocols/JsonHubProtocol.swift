@@ -1,6 +1,6 @@
 import Foundation
 
-class JsonHubProtocol: HubProtocol {
+struct JsonHubProtocol: HubProtocol {
     let name = "json"
     let version = 2
     let transferFormat: TransferFormat = .text

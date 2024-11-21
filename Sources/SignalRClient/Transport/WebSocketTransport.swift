@@ -4,17 +4,18 @@ import FoundationNetworking
 #endif
 
 
-final class WebSocketTransport: NSObject, Transport, @unchecked Sendable {
+final class WebSocketTransport: NSObject, Transport, URLSessionTaskDelegate, @unchecked Sendable {
     private let logger: Logger
     private let accessTokenFactory: (@Sendable() async throws -> String?)?
     private let logMessageContent: Bool
     private let headers: [String: String]
+    private let stopped: AtomicState<Bool> = AtomicState(initialState: false)
+
     private var transferFormat: TransferFormat = .text
     private var websocket: URLSessionWebSocketTask?
     private var urlSession: URLSession?
-
-    var onReceive: OnReceiveHandler?
-    var onClose: OnCloseHander?
+    private var onReceive: OnReceiveHandler?
+    private var onClose: OnCloseHander?
 
     init(accessTokenFactory: (@Sendable () async throws -> String?)?,
          logger: Logger,
@@ -28,8 +29,16 @@ final class WebSocketTransport: NSObject, Transport, @unchecked Sendable {
         self.urlSession = urlSession ?? URLSession.shared
     }
 
+    func onReceive(_ handler: OnReceiveHandler?) {
+        self.onReceive = handler
+    }
+
+    func onClose(_ handler: OnCloseHander?) {
+        self.onClose = handler
+    }
+
     func connect(url: String, transferFormat: TransferFormat) async throws {
-        await self.logger.log(level: .debug, message: "(WebSockets transport) Connecting.")
+        self.logger.log(level: .debug, message: "(WebSockets transport) Connecting.")
 
         self.transferFormat = transferFormat
 
@@ -54,7 +63,7 @@ final class WebSocketTransport: NSObject, Transport, @unchecked Sendable {
             request.addValue(value, forHTTPHeaderField: key)
         }
 
-        let websocket = urlSession!.webSocketTask(with: request)
+        let websocket: URLSessionWebSocketTask = urlSession!.webSocketTask(with: request)
 
         websocket.resume()
 
@@ -78,10 +87,21 @@ final class WebSocketTransport: NSObject, Transport, @unchecked Sendable {
         }
     }
 
-    func stop() async throws {
+    func stop(error: Error?) async throws {
+        // trigger once?
+        if await stopped.compareExchange(expected: false, desired: true) != false {
+            return
+        }
+
         websocket?.cancel()
         urlSession?.finishTasksAndInvalidate()
         await onClose?(nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        Task {
+            try await stop(error: error)
+        }
     }
 
     private func receiveMessage() async {
