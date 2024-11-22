@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "SignalRClientDevSample",
+    name: "Sample",
     platforms: [
         .macOS(.v10_15)
     ],
     dependencies: [
-        .package(path: "../")
+        .package(name: "signalr-swift", path: "../")
     ],
     targets: [
         .executableTarget(
-            name: "SignalRClientDevSample",
-            dependencies: ["SignalRClient"]
+            name: "Sample",
+            dependencies: [.product(name: "SignalRClient", package: "signalr-swift")]
         )
     ]
 )

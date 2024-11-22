@@ -40,19 +40,9 @@ public class HubConnectionBuilder {
             fatalError("url must be set with .withUrl(String:)")
         }
 
-
-        let connection = connection ?? 
-        guard let connection = connection else {
-            fatalError("Connection must be set.")
-        }
-
-        guard let logger = logger else {
-            fatalError("Logger must be set.")
-        }
-
-        guard let hubProtocol = hubProtocol else {
-            fatalError("Hub protocol must be set.")
-        }
+        let connection = connection ?? HttpConnection(url: url)
+        let logger = logger ?? DefaultLogger()
+        let hubProtocol = hubProtocol ?? JsonHubProtocol()
 
         return HubConnection(connection: connection,
                              logger: logger,

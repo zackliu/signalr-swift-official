@@ -1,5 +1,8 @@
 import SignalRClient
 
-print("Using SignalRClient \(SignalRClient.version)")
+print("Using SignalRClient")
 
-let instance = HubConnection()
+let client = HubConnectionBuilder().withUrl(url: String("http://localhost:8080/Chat")).build()
+try await client.start()
+
+print("After start")

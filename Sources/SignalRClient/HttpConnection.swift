@@ -88,6 +88,7 @@ struct AvailableTransport: Decodable {
 
 class HttpConnection: IConnection, @unchecked Sendable {
     // MARK: - Properties
+    private let negotiationRedirectionLimit = 100
 
     private var connectionState: ConnectionState = .disconnected
     private var connectionStarted: Bool = false
@@ -200,18 +201,20 @@ class HttpConnection: IConnection, @unchecked Sendable {
                     transport = try constructTransport(transport: .webSockets)
                     try await startTransport(url: url, transferFormat: transferFormat)
                 } else {
-                    throw NSError(domain: "Negotiation can only be skipped when using the WebSocket transport directly.", code: 0)
+                    throw SignalRError.negotiationError("Negotiation can only be skipped when using the WebSocket transport directly.")
                 }
             } else {
                 var negotiateResponse: NegotiateResponse?
                 var redirects = 0
                 repeat {
                     negotiateResponse = try await getNegotiationResponse(url: url)
+                    logger.log(level: .debug, message: "Negotiation response received.")
+
                     if connectionState == .disconnecting || connectionState == .disconnected {
-                        throw NSError(domain: "The connection was stopped during negotiation.", code: 0)
+                        throw SignalRError.negotiationError("The connection was stopped during negotiation.")
                     }
                     if let error = negotiateResponse?.error {
-                        throw NSError(domain: error, code: 0)
+                        throw SignalRError.negotiationError(error)
                     }
                     if negotiateResponse?.url != nil {
                         url = negotiateResponse?.url ?? url
@@ -221,21 +224,17 @@ class HttpConnection: IConnection, @unchecked Sendable {
                         // the returned access token
                         accessTokenFactory = { return accessToken }
                         httpClient.accessTokenFactory = accessTokenFactory
-                        httpClient.accessTokenFactory = nil
                     }
                     redirects += 1
-                } while negotiateResponse?.url != nil && redirects < 100
+                } while negotiateResponse?.url != nil && redirects < negotiationRedirectionLimit
 
-                if redirects == 100 && negotiateResponse?.url != nil {
-                    throw NSError(domain: "Negotiate redirection limit exceeded.", code: 0)
+                if redirects == negotiationRedirectionLimit && negotiateResponse?.url != nil {
+                    throw SignalRError.negotiationError("Negotiate redirection limit exceeded: \(negotiationRedirectionLimit).")
                 }
 
+                logger.log(level: .debug, message: "Successfully finish the negotiation. \(String(describing: negotiateResponse))")
                 try await createTransport(url: url, requestedTransport: options.transport, negotiateResponse: negotiateResponse, requestedTransferFormat: transferFormat)
             }
-
-            // if transport is LongPollingTransport {
-            //     features["inherentKeepAlive"] = true
-            // }
 
             if connectionState == .connecting {
                 logger.log(level: .debug, message: "The HttpConnection connected successfully.")
@@ -339,6 +338,7 @@ class HttpConnection: IConnection, @unchecked Sendable {
                 do {
                     try await startTransport(url: connectUrl, transferFormat: requestedTransferFormat)
                     connectionId = negotiate?.connectionId
+                    logger.log(level: .debug, message: "Using the \(endpoint.transport) transport successfully.")
                     return
                 } catch {
                     logger.log(level: .error, message: "Failed to start the transport '\(endpoint.transport)': \(error)")
@@ -347,7 +347,7 @@ class HttpConnection: IConnection, @unchecked Sendable {
                     if connectionState != .connecting {
                         let message = "Failed to select transport before stop() was called."
                         logger.log(level: .debug, message: message)
-                        throw NSError(domain: message, code: 0)
+                        throw SignalRError.failedToStartConnection(message)
                     }
                 }
             }
@@ -355,48 +355,20 @@ class HttpConnection: IConnection, @unchecked Sendable {
 
         if !transportExceptions.isEmpty {
             let errorsDescription = transportExceptions.map { "\($0)" }.joined(separator: " ")
-            throw NSError(domain: "Unable to connect to the server with any of the available transports. \(errorsDescription)", code: 0)
+            throw SignalRError.failedToStartConnection("Unable to connect to the server with any of the available transports. \(errorsDescription)")
         }
 
-        throw NSError(domain: "None of the transports supported by the client are supported by the server.", code: 0)
+        throw SignalRError.failedToStartConnection("None of the transports supported by the client are supported by the server.")
     }
 
     private func startTransport(url: String, transferFormat: TransferFormat) async throws {
-        transport?.onReceive(self.onReceive)
-        transport?.onClose  { [weak self] error in
+        transport!.onReceive(self.onReceive)
+        transport!.onClose  { [weak self] error in
             guard let self = self else { return }
             await self.stopConnection(error: error)
         }
 
-        // if features["reconnect"] != nil {
-        //     transport?.onClose = { [weak self] error in
-        //         Task {
-        //             guard let self = self else { return }
-        //             var callStop = false
-        //             if self.features["reconnect"] != nil {
-        //                 do {
-        //                     (self.features["disconnected"] as? () -> Void)?()
-        //                     try await self.transport?.connect(url: url, transferFormat: transferFormat)
-        //                     try await (self.features["resend"] as? () async throws -> Void)?()
-        //                 } catch {
-        //                     callStop = true
-        //                 }
-        //             } else {
-        //                 self.stopConnection(error: error)
-        //                 return
-        //             }
-        //             if callStop {
-        //                 self.stopConnection(error: error)
-        //             }
-        //         }
-        //     }
-        // } else {
-        //     transport?.onClose = { [weak self] error in
-        //         self?.stopConnection(error: error)
-        //     }
-        // }
-
-        try await transport?.connect(url: url, transferFormat: transferFormat)
+        try await transport!.connect(url: url, transferFormat: transferFormat)
     }
 
     private func stopConnection(error: Error?) async {

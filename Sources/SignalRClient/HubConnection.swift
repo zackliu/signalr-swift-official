@@ -124,8 +124,9 @@ public actor HubConnection {
 
         // After connection open, perform handshake
         let version = hubProtocol.version
-        // As we don't support version 2 now
-        guard version == 1 else {
+        // As we only support 0 now
+        guard version == 0 else {
+            logger.log(level: .error, message: "Unsupported handshake version: \(version)")
             throw SignalRError.unsupportedHandshakeVersion
         }
 
@@ -135,6 +136,7 @@ public actor HubConnection {
         async let handshakeTask = withCheckedThrowingContinuation { continuation in 
             var hanshakeFinished: Bool = false
             handshakeResoler = { message in
+                self.logger.log(level: .debug, message: "Handshake resolver called")
                 if (hanshakeFinished) {
                     return
                 }
@@ -142,6 +144,7 @@ public actor HubConnection {
                 continuation.resume(returning: message)
             }
             handshakeRejector = { error in
+                self.logger.log(level: .debug, message: "Handshake rejector called")
                 if (hanshakeFinished) {
                     return
                 }
@@ -150,10 +153,12 @@ public actor HubConnection {
             }
         }
 
+        logger.log(level: .debug, message: "Before sending handshake request message")
         try await sendMessageInternal(.string(HandshakeProtocol.writeHandshakeRequest(handshakeRequest: handshakeRequset)))
         logger.log(level: .debug, message: "Sent handshake request message with version: \(version), protocol: \(hubProtocol.name)")
 
-        _ = try await handshakeTask
+        let response = try await handshakeTask
+        logger.log(level: .debug, message: "Handshake completed")
     }
 
     private func sendMessageInternal(_ content: StringOrData) async throws {
