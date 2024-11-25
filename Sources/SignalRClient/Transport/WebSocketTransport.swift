@@ -44,7 +44,7 @@ final class WebSocketTransport: NSObject, Transport, URLSessionWebSocketDelegate
         self.urlSession = URLSession.shared
         self.transferFormat = transferFormat
 
-        var urlComponents = URLComponents(url: URL(string: "http://localhost:8080/Chat")!, resolvingAgainstBaseURL: false)!
+        var urlComponents = URLComponents(url: URL(string: url)!, resolvingAgainstBaseURL: false)!
 
         if urlComponents.scheme == "http" {
             urlComponents.scheme = "ws"
