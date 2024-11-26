@@ -12,14 +12,6 @@ private enum ConnectionState: String {
     case disconnecting = "Disconnecting"
 }
 
-protocol IConnection {
-    var onReceive: Transport.OnReceiveHandler? { get set }
-    var onClose: Transport.OnCloseHander? { get set }
-    func start(transferFormat: TransferFormat) async throws
-    func send(_ data: StringOrData) async throws
-    func stop(error: Error?) async
-}
-
 struct IHttpConnectionOptions {
     var logger: Logger?
     var accessTokenFactory: (@Sendable () async throws -> String?)?
@@ -86,7 +78,7 @@ struct AvailableTransport: Decodable {
 
 // MARK: - HttpConnection Class
 
-class HttpConnection: IConnection, @unchecked Sendable {
+class HttpConnection: ConnectionProtocol, @unchecked Sendable {
     // MARK: - Properties
     private let negotiationRedirectionLimit = 100
 

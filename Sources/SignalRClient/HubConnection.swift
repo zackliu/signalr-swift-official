@@ -8,7 +8,7 @@ public actor HubConnection {
     private let keepAliveInterval: TimeInterval
     private let logger: Logger
     private let hubProtocol: HubProtocol
-    private let connection: HttpConnection
+    private let connection: ConnectionProtocol
     // private let connectionState: ConnectionState
 
     private var connectionStarted: Bool = false
@@ -18,7 +18,7 @@ public actor HubConnection {
     nonisolated(unsafe) private var handshakeResoler: ((HandshakeResponseMessage) -> Void)?
     nonisolated(unsafe) private var handshakeRejector: ((Error) -> Void)?
 
-    internal init(connection: HttpConnection,
+    internal init(connection: ConnectionProtocol,
                 logger: Logger,
                 hubProtocol: HubProtocol,
                 serverTimeout: TimeInterval?,
@@ -33,9 +33,6 @@ public actor HubConnection {
     }
 
     public func start() async throws {
-        self.connection.onClose = handleConnectionClose
-        self.connection.onReceive = processIncomingData
-
         try await startInternal()
     }
 
@@ -64,12 +61,8 @@ public actor HubConnection {
         // Register a handler for the connection closing
     }
 
-    public func onReconnecting(handler: @escaping () async -> Void) {
-        // Register a handler for the connection reconnecting
-    }
-
-    public func onReconnected(handler: @escaping (_ connectionId: String) async -> Void) {
-        // Register a handler for the connection reconnected
+    public func state() -> HubConnectionState {
+        return connectionStatus
     }
 
     @Sendable private func handleConnectionClose(error: Error?) async {
@@ -89,14 +82,20 @@ public actor HubConnection {
         completeClose()
     }
 
-    @Sendable private func processIncomingData(_ prehandledData: StringOrData) async {
-        var data = prehandledData
+    // Internal for testing
+    @Sendable internal func processIncomingData(_ prehandledData: StringOrData) async {
+        var data: StringOrData? = prehandledData
         if (!receivedHandshakeResponse) {
             do {
-                data = try await processHandshakeResponse(data)
+                data = try await processHandshakeResponse(prehandledData)
+                receivedHandshakeResponse = true
             } catch {
                 // close connection
             }
+        }
+
+        if (data == nil) {
+            return
         }
 
         // show the data now
@@ -120,7 +119,26 @@ public actor HubConnection {
             throw SignalRError.duplicatedStart
         }
 
-        try await connection.start()
+        connectionStatus = .Connecting
+        logger.log(level: .debug, message: "Starting HubConnection")
+
+        self.connection.onClose = handleConnectionClose
+        self.connection.onReceive = processIncomingData
+
+        do {
+            try await startCore()
+        } catch {
+            connectionStatus = .Disconnected
+            logger.log(level: .debug, message: "HubConnection start failed \(error)")
+            throw error
+        }
+        
+        connectionStatus = .Connected
+        logger.log(level: .debug, message: "HubConnection started")
+    }
+
+    private func startCore() async throws {
+        try await connection.start(transferFormat: hubProtocol.transferFormat)
 
         // After connection open, perform handshake
         let version = hubProtocol.version
@@ -133,10 +151,9 @@ public actor HubConnection {
         let handshakeRequset = HandshakeRequestMessage(protocol: hubProtocol.name, version: version)
 
         logger.log(level: .debug, message: "Sending handshake request message.")
-        async let handshakeTask = withCheckedThrowingContinuation { continuation in 
+        async let handshakeTask = withUnsafeThrowingContinuation { continuation in 
             var hanshakeFinished: Bool = false
             handshakeResoler = { message in
-                self.logger.log(level: .debug, message: "Handshake resolver called")
                 if (hanshakeFinished) {
                     return
                 }
@@ -144,7 +161,6 @@ public actor HubConnection {
                 continuation.resume(returning: message)
             }
             handshakeRejector = { error in
-                self.logger.log(level: .debug, message: "Handshake rejector called")
                 if (hanshakeFinished) {
                     return
                 }
@@ -153,19 +169,29 @@ public actor HubConnection {
             }
         }
 
-        logger.log(level: .debug, message: "Before sending handshake request message")
         try await sendMessageInternal(.string(HandshakeProtocol.writeHandshakeRequest(handshakeRequest: handshakeRequset)))
         logger.log(level: .debug, message: "Sent handshake request message with version: \(version), protocol: \(hubProtocol.name)")
 
-        let response = try await handshakeTask
-        logger.log(level: .debug, message: "Handshake completed")
+        do {
+            _ = try await handshakeTask
+            logger.log(level: .debug, message: "Handshake completed")
+
+            if (connectionStatus == .Disconnecting || connectionStatus == .Disconnected) {
+                // Connection was closed during handshake. It may happen after handshake task is resolved
+                throw SignalRError.connectionAborted
+            }
+        } catch {
+            logger.log(level: .error, message: "Handshake failed: \(error)")
+            throw error
+        }
     }
 
     private func sendMessageInternal(_ content: StringOrData) async throws {
-
+        // Reset keepalive timer
+        try await connection.send(content)
     }
 
-    private func processHandshakeResponse(_ content: StringOrData) async throws -> StringOrData {
+    private func processHandshakeResponse(_ content: StringOrData) async throws -> StringOrData? {
         var remainingData: StringOrData?
         var handshakeResponse: HandshakeResponseMessage
 
@@ -187,11 +213,11 @@ public actor HubConnection {
         }
 
         handshakeResoler!(handshakeResponse)
-        return remainingData!
+        return remainingData
     }
 }
 
-enum HubConnectionState {
+public enum HubConnectionState {
     case Disconnected
     case Connecting
     case Connected

@@ -62,7 +62,7 @@ class HandshakeProtocol {
         }
 
         let jsonObject = try JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any]
-        if let jsonObject = jsonObject, jsonObject["type"] != nil {
+        if let jsonObject = jsonObject, jsonObject["type"] != nil { // contains type means a normal message
             throw SignalRError.expectedHandshakeResponse
         }
 

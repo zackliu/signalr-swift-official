@@ -24,7 +24,7 @@ struct HttpTransportType: OptionSet {
 }
 
 /// Specifies the transfer format for a connection.
-public enum TransferFormat: Int, Codable {
+public enum TransferFormat: Int, Codable, Sendable {
     /// Specifies that only text data will be transmitted over the connection.
     case text = 1
     /// Specifies that binary data will be transmitted over the connection.
