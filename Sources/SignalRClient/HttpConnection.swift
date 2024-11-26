@@ -268,7 +268,6 @@ class HttpConnection: ConnectionProtocol, @unchecked Sendable {
         headers[name] = value
 
         let negotiateUrl = resolveNegotiateUrl(url: url)
-        logger.log(level: .debug, message: "Sending negotiation request: \(negotiateUrl).")
 
         do {
             var request = URLRequest(url: URL(string: negotiateUrl)!)
