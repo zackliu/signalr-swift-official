@@ -12,18 +12,6 @@ private enum ConnectionState: String {
     case disconnecting = "Disconnecting"
 }
 
-protocol IConnection {
-    var onReceive: Transport.OnReceiveHandler? { get set }
-    var onClose: Transport.OnCloseHander? { get set }
-    func start(transferFormat: TransferFormat) async throws
-    func send(_ data: StringOrData) async throws
-    func stop(error: Error?) async
-}
-
-enum LogLevel {
-    case debug, information, warning, error
-}
-
 struct IHttpConnectionOptions {
     var logger: Logger?
     var accessTokenFactory: (@Sendable () async throws -> String?)?
@@ -90,8 +78,9 @@ struct AvailableTransport: Decodable {
 
 // MARK: - HttpConnection Class
 
-class HttpConnection: IConnection, @unchecked Sendable {
+class HttpConnection: ConnectionProtocol, @unchecked Sendable {
     // MARK: - Properties
+    private let negotiationRedirectionLimit = 100
 
     private var connectionState: ConnectionState = .disconnected
     private var connectionStarted: Bool = false
@@ -130,7 +119,7 @@ class HttpConnection: IConnection, @unchecked Sendable {
     // MARK: - Public Methods
 
     func start(transferFormat: TransferFormat = .binary) async throws {
-        await logger.log(level: .debug, message: "Starting connection with transfer format '\(transferFormat)'.")
+        logger.log(level: .debug, message: "Starting connection with transfer format '\(transferFormat)'.")
 
         guard connectionState == .disconnected else {
             throw NSError(domain: "HttpConnection", code: 0, userInfo: [NSLocalizedDescriptionKey: "Cannot start an HttpConnection that is not in the 'Disconnected' state."])
@@ -150,12 +139,12 @@ class HttpConnection: IConnection, @unchecked Sendable {
 
         if connectionState == .disconnecting {
             let message = "Failed to start the HttpConnection before stop() was called."
-            await logger.log(level: .error, message: message)
+            logger.log(level: .error, message: message)
             await stopTask?.value
             throw NSError(domain: message, code: 0)
         } else if connectionState != .connected {
             let message = "HttpConnection.startInternal completed gracefully but didn't enter the connection into the connected state!"
-            await logger.log(level: .error, message: message)
+            logger.log(level: .error, message: message)
             throw NSError(domain: message, code: 0)
         }
 
@@ -172,12 +161,12 @@ class HttpConnection: IConnection, @unchecked Sendable {
 
     func stop(error: Error? = nil) async {
         if connectionState == .disconnected {
-            await logger.log(level: .debug, message: "Call to HttpConnection.stop(\(String(describing: error))) ignored because the connection is already in the disconnected state.")
+            logger.log(level: .debug, message: "Call to HttpConnection.stop(\(String(describing: error))) ignored because the connection is already in the disconnected state.")
             return
         }
 
         if connectionState == .disconnecting {
-            await logger.log(level: .debug, message: "Call to HttpConnection.stop(\(String(describing: error))) ignored because the connection is already in the disconnecting state.")
+            logger.log(level: .debug, message: "Call to HttpConnection.stop(\(String(describing: error))) ignored because the connection is already in the disconnecting state.")
             await stopTask?.value
             return
         }
@@ -204,18 +193,20 @@ class HttpConnection: IConnection, @unchecked Sendable {
                     transport = try constructTransport(transport: .webSockets)
                     try await startTransport(url: url, transferFormat: transferFormat)
                 } else {
-                    throw NSError(domain: "Negotiation can only be skipped when using the WebSocket transport directly.", code: 0)
+                    throw SignalRError.negotiationError("Negotiation can only be skipped when using the WebSocket transport directly.")
                 }
             } else {
                 var negotiateResponse: NegotiateResponse?
                 var redirects = 0
                 repeat {
                     negotiateResponse = try await getNegotiationResponse(url: url)
+                    logger.log(level: .debug, message: "Negotiation response received.")
+
                     if connectionState == .disconnecting || connectionState == .disconnected {
-                        throw NSError(domain: "The connection was stopped during negotiation.", code: 0)
+                        throw SignalRError.negotiationError("The connection was stopped during negotiation.")
                     }
                     if let error = negotiateResponse?.error {
-                        throw NSError(domain: error, code: 0)
+                        throw SignalRError.negotiationError(error)
                     }
                     if negotiateResponse?.url != nil {
                         url = negotiateResponse?.url ?? url
@@ -225,28 +216,24 @@ class HttpConnection: IConnection, @unchecked Sendable {
                         // the returned access token
                         accessTokenFactory = { return accessToken }
                         httpClient.accessTokenFactory = accessTokenFactory
-                        httpClient.accessTokenFactory = nil
                     }
                     redirects += 1
-                } while negotiateResponse?.url != nil && redirects < 100
+                } while negotiateResponse?.url != nil && redirects < negotiationRedirectionLimit
 
-                if redirects == 100 && negotiateResponse?.url != nil {
-                    throw NSError(domain: "Negotiate redirection limit exceeded.", code: 0)
+                if redirects == negotiationRedirectionLimit && negotiateResponse?.url != nil {
+                    throw SignalRError.negotiationError("Negotiate redirection limit exceeded: \(negotiationRedirectionLimit).")
                 }
 
+                logger.log(level: .debug, message: "Successfully finish the negotiation. \(String(describing: negotiateResponse))")
                 try await createTransport(url: url, requestedTransport: options.transport, negotiateResponse: negotiateResponse, requestedTransferFormat: transferFormat)
             }
 
-            // if transport is LongPollingTransport {
-            //     features["inherentKeepAlive"] = true
-            // }
-
             if connectionState == .connecting {
-                await logger.log(level: .debug, message: "The HttpConnection connected successfully.")
+                logger.log(level: .debug, message: "The HttpConnection connected successfully.")
                 connectionState = .connected
             }
         } catch {
-            await logger.log(level: .error, message: "Failed to start the connection: \(error)")
+            logger.log(level: .error, message: "Failed to start the connection: \(error)")
             connectionState = .disconnected
             transport = nil
             throw error
@@ -264,14 +251,14 @@ class HttpConnection: IConnection, @unchecked Sendable {
 
         if transport != nil {
             do {
-                try await transport?.stop()
+                try await transport?.stop(error: nil)
             } catch {
-                await logger.log(level: .error, message: "HttpConnection.transport.stop() threw error '\(error)'.")
+                logger.log(level: .error, message: "HttpConnection.transport.stop() threw error '\(error)'.")
                 await stopConnection(error: error)
             }
             transport = nil
         } else {
-            await logger.log(level: .debug, message: "HttpConnection.transport is undefined in HttpConnection.stop() because start() failed.")
+            logger.log(level: .debug, message: "HttpConnection.transport is undefined in HttpConnection.stop() because start() failed.")
         }
     }
 
@@ -281,7 +268,6 @@ class HttpConnection: IConnection, @unchecked Sendable {
         headers[name] = value
 
         let negotiateUrl = resolveNegotiateUrl(url: url)
-        await logger.log(level: .debug, message: "Sending negotiation request: \(negotiateUrl).")
 
         do {
             var request = URLRequest(url: URL(string: negotiateUrl)!)
@@ -316,7 +302,7 @@ class HttpConnection: IConnection, @unchecked Sendable {
             if let httpError = error as? HttpError, httpError.statusCode == 404 {
                 errorMessage += " Either this is not a SignalR endpoint or there is a proxy blocking the connection."
             }
-            await logger.log(level: .error, message: errorMessage)
+            logger.log(level: .error, message: errorMessage)
             throw NSError(domain: errorMessage, code: 0)
         }
     }
@@ -343,15 +329,16 @@ class HttpConnection: IConnection, @unchecked Sendable {
                 do {
                     try await startTransport(url: connectUrl, transferFormat: requestedTransferFormat)
                     connectionId = negotiate?.connectionId
+                    logger.log(level: .debug, message: "Using the \(endpoint.transport) transport successfully.")
                     return
                 } catch {
-                    await logger.log(level: .error, message: "Failed to start the transport '\(endpoint.transport)': \(error)")
+                    logger.log(level: .error, message: "Failed to start the transport '\(endpoint.transport)': \(error)")
                     negotiate = nil
                     transportExceptions.append(error)
                     if connectionState != .connecting {
                         let message = "Failed to select transport before stop() was called."
-                        await logger.log(level: .debug, message: message)
-                        throw NSError(domain: message, code: 0)
+                        logger.log(level: .debug, message: message)
+                        throw SignalRError.failedToStartConnection(message)
                     }
                 }
             }
@@ -359,52 +346,24 @@ class HttpConnection: IConnection, @unchecked Sendable {
 
         if !transportExceptions.isEmpty {
             let errorsDescription = transportExceptions.map { "\($0)" }.joined(separator: " ")
-            throw NSError(domain: "Unable to connect to the server with any of the available transports. \(errorsDescription)", code: 0)
+            throw SignalRError.failedToStartConnection("Unable to connect to the server with any of the available transports. \(errorsDescription)")
         }
 
-        throw NSError(domain: "None of the transports supported by the client are supported by the server.", code: 0)
+        throw SignalRError.failedToStartConnection("None of the transports supported by the client are supported by the server.")
     }
 
     private func startTransport(url: String, transferFormat: TransferFormat) async throws {
-        transport?.onReceive = self.onReceive
-        transport?.onClose = { [weak self] error in
+        transport!.onReceive(self.onReceive)
+        transport!.onClose  { [weak self] error in
             guard let self = self else { return }
             await self.stopConnection(error: error)
         }
 
-        // if features["reconnect"] != nil {
-        //     transport?.onClose = { [weak self] error in
-        //         Task {
-        //             guard let self = self else { return }
-        //             var callStop = false
-        //             if self.features["reconnect"] != nil {
-        //                 do {
-        //                     (self.features["disconnected"] as? () -> Void)?()
-        //                     try await self.transport?.connect(url: url, transferFormat: transferFormat)
-        //                     try await (self.features["resend"] as? () async throws -> Void)?()
-        //                 } catch {
-        //                     callStop = true
-        //                 }
-        //             } else {
-        //                 self.stopConnection(error: error)
-        //                 return
-        //             }
-        //             if callStop {
-        //                 self.stopConnection(error: error)
-        //             }
-        //         }
-        //     }
-        // } else {
-        //     transport?.onClose = { [weak self] error in
-        //         self?.stopConnection(error: error)
-        //     }
-        // }
-
-        try await transport?.connect(url: url, transferFormat: transferFormat)
+        try await transport!.connect(url: url, transferFormat: transferFormat)
     }
 
     private func stopConnection(error: Error?) async {
-        await logger.log(level: .debug, message: "HttpConnection.stopConnection(\(String(describing: error))) called while in state \(connectionState).")
+        logger.log(level: .debug, message: "HttpConnection.stopConnection(\(String(describing: error))) called while in state \(connectionState).")
 
         transport = nil
 
@@ -412,12 +371,12 @@ class HttpConnection: IConnection, @unchecked Sendable {
         stopError = nil
 
         if connectionState == .disconnected {
-            await logger.log(level: .debug, message: "Call to HttpConnection.stopConnection(\(String(describing: finalError))) was ignored because the connection is already in the disconnected state.")
+            logger.log(level: .debug, message: "Call to HttpConnection.stopConnection(\(String(describing: finalError))) was ignored because the connection is already in the disconnected state.")
             return
         }
 
         if connectionState == .connecting {
-            await logger.log(level: .warning, message: "Call to HttpConnection.stopConnection(\(String(describing: finalError))) was ignored because the connection is still in the connecting state.")
+            logger.log(level: .warning, message: "Call to HttpConnection.stopConnection(\(String(describing: finalError))) was ignored because the connection is still in the connecting state.")
             return
         }
 
@@ -426,9 +385,9 @@ class HttpConnection: IConnection, @unchecked Sendable {
         }
 
         if let error = finalError {
-            await logger.log(level: .error, message: "Connection disconnected with error '\(error)'.")
+            logger.log(level: .error, message: "Connection disconnected with error '\(error)'.")
         } else {
-            await logger.log(level: .information, message: "Connection disconnected.")
+            logger.log(level: .information, message: "Connection disconnected.")
         }
 
         connectionId = nil
@@ -493,7 +452,7 @@ class HttpConnection: IConnection, @unchecked Sendable {
 
     private func resolveTransportOrError(endpoint: AvailableTransport, requestedTransport: HttpTransportType?, requestedTransferFormat: TransferFormat, useStatefulReconnect: Bool) async -> Any {
         guard let transportType = HttpTransportType.from(endpoint.transport) else {
-            await logger.log(level: .debug, message: "Skipping transport '\(endpoint.transport)' because it is not supported by this client.")
+            logger.log(level: .debug, message: "Skipping transport '\(endpoint.transport)' because it is not supported by this client.")
             return NSError(domain: "Skipping transport '\(endpoint.transport)' because it is not supported by this client.", code: 0)
         }
 
@@ -508,11 +467,11 @@ class HttpConnection: IConnection, @unchecked Sendable {
                     return error
                 }
             } else {
-                await logger.log(level: .debug, message: "Skipping transport '\(transportType)' because it does not support the requested transfer format '\(requestedTransferFormat)'.")
+                logger.log(level: .debug, message: "Skipping transport '\(transportType)' because it does not support the requested transfer format '\(requestedTransferFormat)'.")
                 return NSError(domain: "'\(transportType)' does not support \(requestedTransferFormat).", code: 0)
             }
         } else {
-            await logger.log(level: .debug, message: "Skipping transport '\(transportType)' because it was disabled by the client.")
+            logger.log(level: .debug, message: "Skipping transport '\(transportType)' because it was disabled by the client.")
             return NSError(domain: "'\(transportType)' is disabled by the client.", code: 0)
         }
     }

@@ -1,6 +1,6 @@
 import Foundation
 
-protocol HubProtocol {
+public protocol HubProtocol: Sendable {
     /// The name of the protocol. This is used by SignalR to resolve the protocol between the client and server.
     var name: String { get }
     /// The version of the protocol.
@@ -30,7 +30,7 @@ protocol HubProtocol {
     func writeMessage(message: HubMessage) throws -> StringOrData
 }
 
-enum StringOrData {
+public enum StringOrData {
     case string(String)
     case data(Data)
 }

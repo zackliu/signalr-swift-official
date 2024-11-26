@@ -1,5 +1,5 @@
 /// Defines the type of a Hub Message.
-enum MessageType: Int, Codable {
+public enum MessageType: Int, Codable {
     /// Indicates the message is an Invocation message.
     case invocation = 1
     /// Indicates the message is a StreamItem message.
