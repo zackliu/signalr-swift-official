@@ -168,20 +168,32 @@ final class HubConnectionTests: XCTestCase {
     }
 
     func whenTaskThrowsTimeout(_ task: @escaping () async throws -> Void, timeout: TimeInterval) async -> Error? {
-        var returnErr: Error?
+        let returnErr: ValueContainer<Error> = ValueContainer()
         let expectation = XCTestExpectation(description: "Task should throw")
         let wrappedTask = Task {
             do {
                 _ = try await task()
             } catch {
-                returnErr = error
+                await returnErr.update(error)
                 expectation.fulfill()
             }
         }
         defer { wrappedTask.cancel() }
 
         await fulfillment(of: [expectation], timeout: timeout)
-        return returnErr
+        return await returnErr.get()
+    }
+
+    private actor ValueContainer<T> {
+        private var value: T?
+
+        func update(_ newValue: T) {
+            value = newValue
+        }
+
+        func get() -> T {
+            return value!
+        }
     }
 }
 
