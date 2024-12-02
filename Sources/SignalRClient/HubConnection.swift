@@ -9,35 +9,83 @@ public actor HubConnection {
     private let logger: Logger
     private let hubProtocol: HubProtocol
     private let connection: ConnectionProtocol
-    // private let connectionState: ConnectionState
+    private let retryPolicy: RetryPolicy
 
     private var connectionStarted: Bool = false
     private var receivedHandshakeResponse: Bool = false
     private var invocationId: Int = 0
-    private var connectionStatus: HubConnectionState = .Disconnected
-    nonisolated(unsafe) private var handshakeResoler: ((HandshakeResponseMessage) -> Void)?
+    private var connectionStatus: HubConnectionState = .Stopped
+    private var stopping: Bool = false
+    private var stopDuringStartError: Error?
+    nonisolated(unsafe) private var handshakeResolver: ((HandshakeResponseMessage) -> Void)?
     nonisolated(unsafe) private var handshakeRejector: ((Error) -> Void)?
+
+    private var stopTask: Task<Void, Never>?
+    private var startTask: Task<Void, Error>?
 
     internal init(connection: ConnectionProtocol,
                 logger: Logger,
                 hubProtocol: HubProtocol,
+                retryPolicy: RetryPolicy,
                 serverTimeout: TimeInterval?,
                 keepAliveInterval: TimeInterval?) {
         self.serverTimeout = serverTimeout ?? defaultTimeout
         self.keepAliveInterval = keepAliveInterval ?? defaultPingInterval
         self.logger = logger
+        self.retryPolicy = retryPolicy
 
         self.connection = connection
         self.hubProtocol = hubProtocol
-        // self.connectionState = ConnectionState()
     }
 
     public func start() async throws {
-        try await startInternal()
+        if (connectionStatus != .Stopped) {
+            throw SignalRError.invalidOperation("Start client while not in a stopped state.")
+        }
+
+        connectionStatus = .Connecting
+        
+        startTask = Task {
+            do {
+                await self.connection.onClose(handleConnectionClose)
+                await self.connection.onReceive(processIncomingData)
+
+                try await startInternal()
+                connectionStatus = .Connected
+                logger.log(level: .debug, message: "HubConnection started")
+            } catch {
+                connectionStatus = .Stopped
+                stopping = false
+                logger.log(level: .debug, message: "HubConnection start failed \(error)")
+                throw error
+            }
+        }
+
+        try await startTask!.value
     }
 
-    public func stop() async throws {
-        // Stop the connection
+    public func stop() async {
+        // 1. Before the start, it should be Stopped. Just return
+        if (connectionStatus == .Stopped) {
+            logger.log(level: .debug, message: "Connection is already stopped")
+            return
+        }
+
+        // 2. Another stop is running, just wait for it
+        if (stopping) {
+            logger.log(level: .debug, message: "Connection is already stopping")
+            await stopTask?.value
+            return
+        }
+
+        stopping = true
+        
+        // In this step, there's no other start running
+        stopTask = Task {
+            await stopInternal()
+        }
+
+        await stopTask!.value
     }
 
     public func send(method: String, arguments: Any...) async throws {
@@ -65,29 +113,102 @@ public actor HubConnection {
         return connectionStatus
     }
 
-    @Sendable private func handleConnectionClose(error: Error?) async {
-        logger.log(level: .information, message: "Connection closed")
+    private func stopInternal() async {
+        if (connectionStatus == .Stopped) {
+            return
+        }
 
-        if (connectionStatus == .Disconnected) {
+        let startTask = self.startTask
+
+        stopDuringStartError = SignalRError.connectionAborted
+        if (handshakeRejector != nil) {
+            handshakeRejector!(SignalRError.connectionAborted)
+        }
+
+        await connection.stop(error: nil)
+
+        do {
+            try await startTask?.value
+        } catch {
+            // If start failed, already in stopped state
+        }
+    }
+
+    @Sendable internal func handleConnectionClose(error: Error?) async {
+        logger.log(level: .information, message: "Connection closed")
+        stopDuringStartError = error ?? SignalRError.connectionAborted
+
+        if (connectionStatus == .Stopped) {
             completeClose()
             return
         }
 
-        connectionStatus = .Disconnecting
-
-        if (handshakeResoler != nil) {
+        stopDuringStartError = SignalRError.connectionAborted
+        if (handshakeResolver != nil) {
             handshakeRejector!(SignalRError.connectionAborted)
         }
 
+        if (stopping) {
+            completeClose()
+        }
+
+        // Several status possible
+        // 1. Connecting: In this case, we're still in the control of start(), don't reconnect here but let start() fail (throw error in startInternal())
+        // 2. Connected: In this case, we should reconnect
+        // 3. Reconnecting: In this case, we're in the control of previous reconnect(), let that function handle the reconnection
+
+        if (connectionStatus == .Connected) {
+            do {
+                try await reconnect()
+            } catch {
+                logger.log(level: .warning, message: "Connection reconnect failed: \(error)")
+            }
+        }
+    }
+
+    private func reconnect() async throws {
+        var retryCount = 0
+        // reconnect
+        while let interval = retryPolicy.nextRetryInterval(retryCount: retryCount) {
+            try Task.checkCancellation()
+            if (stopping) {
+                break
+            }
+
+            logger.log(level: .debug, message: "Connection reconnecting")
+            connectionStatus = .Reconnecting
+            do {
+                try await startInternal()
+                // DO we need to check status here?
+                connectionStatus = .Connected
+                return
+            } catch {
+                logger.log(level: .warning, message: "Connection reconnect failed: \(error)")
+            }
+
+            if (stopping) {
+                break
+            }
+
+            retryCount += 1
+
+            do {
+                try await Task.sleep(nanoseconds: UInt64(interval * 1000))
+            } catch {
+                break
+            }
+        }
+
+        logger.log(level: .warning, message: "Connection reconnect exceeded retry policy")
         completeClose()
     }
 
     // Internal for testing
-    @Sendable internal func processIncomingData(_ prehandledData: StringOrData) async {
+    @Sendable internal func processIncomingData(_ prehandledData: StringOrData) {
         var data: StringOrData? = prehandledData
         if (!receivedHandshakeResponse) {
             do {
-                data = try await processHandshakeResponse(prehandledData)
+                data = try processHandshakeResponse(prehandledData)
                 receivedHandshakeResponse = true
             } catch {
                 // close connection
@@ -107,37 +228,20 @@ public actor HubConnection {
     }
 
     private func completeClose() {
-        connectionStatus = .Disconnected
+        connectionStatus = .Stopped
+        stopping = false
     }
 
     private func startInternal() async throws {
         try Task.checkCancellation()
 
-        logger.log(level: .information, message: "Connection starting")
-
-        if (connectionStatus != .Disconnected) {
-            throw SignalRError.duplicatedStart
+        guard stopping == false else {
+            throw SignalRError.invalidOperation("Stopping is called")
         }
 
-        connectionStatus = .Connecting
         logger.log(level: .debug, message: "Starting HubConnection")
 
-        self.connection.onClose = handleConnectionClose
-        self.connection.onReceive = processIncomingData
-
-        do {
-            try await startCore()
-        } catch {
-            connectionStatus = .Disconnected
-            logger.log(level: .debug, message: "HubConnection start failed \(error)")
-            throw error
-        }
-        
-        connectionStatus = .Connected
-        logger.log(level: .debug, message: "HubConnection started")
-    }
-
-    private func startCore() async throws {
+        stopDuringStartError = nil
         try await connection.start(transferFormat: hubProtocol.transferFormat)
 
         // After connection open, perform handshake
@@ -148,38 +252,45 @@ public actor HubConnection {
             throw SignalRError.unsupportedHandshakeVersion
         }
 
-        let handshakeRequset = HandshakeRequestMessage(protocol: hubProtocol.name, version: version)
+        receivedHandshakeResponse = false
+        let handshakeRequest = HandshakeRequestMessage(protocol: hubProtocol.name, version: version)
 
         logger.log(level: .debug, message: "Sending handshake request message.")
-        async let handshakeTask = withUnsafeThrowingContinuation { continuation in 
-            var hanshakeFinished: Bool = false
-            handshakeResoler = { message in
-                if (hanshakeFinished) {
-                    return
-                }
-                hanshakeFinished = true
-                continuation.resume(returning: message)
-            }
-            handshakeRejector = { error in
-                if (hanshakeFinished) {
-                    return
-                }
-                hanshakeFinished = true
-                continuation.resume(throwing: error)
-            }
-        }
-
-        try await sendMessageInternal(.string(HandshakeProtocol.writeHandshakeRequest(handshakeRequest: handshakeRequset)))
-        logger.log(level: .debug, message: "Sent handshake request message with version: \(version), protocol: \(hubProtocol.name)")
 
         do {
-            _ = try await handshakeTask
-            logger.log(level: .debug, message: "Handshake completed")
+            _ = try await withUnsafeThrowingContinuation { continuation in 
+                var hanshakeFinished: Bool = false
+                handshakeResolver = { message in
+                    if (hanshakeFinished) {
+                        return
+                    }
+                    hanshakeFinished = true
+                    continuation.resume(returning: message)
+                }
+                handshakeRejector = { error in
+                    if (hanshakeFinished) {
+                        return
+                    }
+                    hanshakeFinished = true
+                    continuation.resume(throwing: error)
+                }
 
-            if (connectionStatus == .Disconnecting || connectionStatus == .Disconnected) {
-                // Connection was closed during handshake. It may happen after handshake task is resolved
-                throw SignalRError.connectionAborted
+                // Send handshake request
+                Task {
+                    do {
+                        try await self.sendMessageInternal(.string(HandshakeProtocol.writeHandshakeRequest(handshakeRequest: handshakeRequest)))
+                        logger.log(level: .debug, message: "Sent handshake request message with version: \(version), protocol: \(hubProtocol.name)")
+                    } catch {
+                        self.handshakeRejector!(error)
+                    }
+                }
             }
+
+            guard stopDuringStartError == nil else {
+                throw stopDuringStartError!
+            }
+
+            logger.log(level: .debug, message: "Handshake completed")
         } catch {
             logger.log(level: .error, message: "Handshake failed: \(error)")
             throw error
@@ -191,7 +302,7 @@ public actor HubConnection {
         try await connection.send(content)
     }
 
-    private func processHandshakeResponse(_ content: StringOrData) async throws -> StringOrData? {
+    private func processHandshakeResponse(_ content: StringOrData) throws -> StringOrData? {
         var remainingData: StringOrData?
         var handshakeResponse: HandshakeResponseMessage
 
@@ -212,15 +323,15 @@ public actor HubConnection {
             logger.log(level: .debug, message: "Handshake compeleted")
         }
 
-        handshakeResoler!(handshakeResponse)
+        handshakeResolver!(handshakeResponse)
         return remainingData
     }
 }
 
 public enum HubConnectionState {
-    case Disconnected
+    // The connection is stopped. Start can only be called if the connection is in this state.
+    case Stopped
     case Connecting
     case Connected
-    case Disconnecting
     case Reconnecting
 }
