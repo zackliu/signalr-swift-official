@@ -22,8 +22,11 @@ public class HubConnectionBuilder {
         return self
     }
 
-    public func withHubProtocol(hubProtocol: HubProtocol) -> HubConnectionBuilder {
-        self.hubProtocol = hubProtocol
+    public func withHubProtocol(hubProtocol: HubProtocolType) -> HubConnectionBuilder {
+        switch hubProtocol {
+            case .json:
+                self.hubProtocol = JsonHubProtocol()
+        }
         return self
     }
 
@@ -64,4 +67,8 @@ public class HubConnectionBuilder {
                              serverTimeout: serverTimeout,
                              keepAliveInterval: keepAliveInterval)
     }
+}
+
+public enum HubProtocolType {
+    case json
 }

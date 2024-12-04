@@ -1,6 +1,6 @@
 import Foundation
 
-public protocol HubProtocol: Sendable {
+protocol HubProtocol: Sendable {
     /// The name of the protocol. This is used by SignalR to resolve the protocol between the client and server.
     var name: String { get }
     /// The version of the protocol.
@@ -17,7 +17,7 @@ public protocol HubProtocol: Sendable {
        - input: A Data containing the serialized representation.
      - Returns: An array of `HubMessage` objects.
      */
-    func parseMessages(input: StringOrData) throws -> [HubMessage]
+    func parseMessages(input: StringOrData, binder: InvocationBinder) throws -> [HubMessage]
 
     /**
      Writes the specified `HubMessage` to a String or Data and returns it.
