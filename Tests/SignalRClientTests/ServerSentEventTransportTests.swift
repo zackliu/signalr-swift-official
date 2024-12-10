@@ -1,3 +1,4 @@
+#if canImport(EventSource)
 import XCTest
 
 @testable import SignalRClient
@@ -202,3 +203,4 @@ extension ServerSentEventTransport {
         self.options.headers![mockKey] = mockId
     }
 }
+#endif

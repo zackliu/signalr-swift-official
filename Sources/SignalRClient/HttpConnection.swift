@@ -105,7 +105,7 @@ actor HttpConnection: ConnectionProtocol {
     init(url: String, options: HttpConnectionOptions = HttpConnectionOptions()) {
         precondition(!url.isEmpty, "url is required")
 
-        self.logger =  Logger(logLevel: options.logLevel, logHandler: options.logHandler ?? DefaultLogHandler())
+        self.logger = Logger(logLevel: options.logLevel, logHandler: options.logHandler ?? DefaultLogHandler())
         self.baseUrl = HttpConnection.resolveUrl(url)
         self.options = options
 
@@ -442,8 +442,13 @@ actor HttpConnection: ConnectionProtocol {
                     headers: options.headers ?? [:]
                 )
             case .serverSentEvents:
+#if canImport(EventSource)
                 let accessToken = await self.httpClient.accessToken
-                return  ServerSentEventTransport(httpClient: self.httpClient, accessToken: accessToken, logger: logger, options: options)
+                return ServerSentEventTransport(httpClient: self.httpClient, accessToken: accessToken, logger: logger, options: options)
+#else
+                // TODO: Need to better handle this later
+                throw SignalRError.unsupportedTransport
+#endif                
             case .longPolling:
                  return LongPollingTransport(httpClient: httpClient, logger: logger, options: options)
             default:

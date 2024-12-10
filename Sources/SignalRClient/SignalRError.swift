@@ -23,6 +23,8 @@ public enum SignalRError: Error, Equatable {
     case eventSourceFailedToConnect
     case eventSourceInvalidTransferFormat
     case invalidUrl(String)
+    case invocationError(String)
+    case unsupportedTransport
 
     var localizedDescription: String {
         switch self {
@@ -72,6 +74,10 @@ public enum SignalRError: Error, Equatable {
             return "The Server-Sent Events transport only supports the 'Text' transfer format"
         case .invalidUrl(let url):
             return "Invalid url: \(url)"
+        case .invocationError(let errorMessage):
+            return "Invocation error: \(errorMessage)"
+        case .unsupportedTransport:
+            return "The transport is not supported."
         }
     }
 }
