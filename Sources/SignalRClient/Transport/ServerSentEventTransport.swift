@@ -1,5 +1,3 @@
-#if canImport(EventSource)
-import EventSource
 import Foundation
 
 actor ServerSentEventTransport: Transport {
@@ -127,7 +125,6 @@ final class DefaultEventSourceAdaptor: EventSourceAdaptor, @unchecked Sendable {
         let openTcs = TaskCompletionSource<Void>()
 
         eventSource.onOpen {
-            // This will be triggered when a non 2XX code is returned. The spec doesn't define this behaviour. So it's implementation specific.
             Task {
                 _ = await openTcs.trySetResult(.success(()))
                 self.eventSource = eventSource
@@ -135,7 +132,7 @@ final class DefaultEventSourceAdaptor: EventSourceAdaptor, @unchecked Sendable {
         }
         
         messageStream = AsyncStream{ continuation in
-            eventSource.onComplete { statusCode, _, err in
+            eventSource.onComplete { statusCode, err in
                 Task {
                     let connectFail = await openTcs.trySetResult(
                         .failure(SignalRError.eventSourceFailedToConnect))
@@ -149,10 +146,7 @@ final class DefaultEventSourceAdaptor: EventSourceAdaptor, @unchecked Sendable {
                 }
             }
             
-            eventSource.onMessage { _, _, data in
-                guard let data = data else {
-                    return
-                }
+            eventSource.onMessage { data in
                 continuation.yield(data)
             }
         }
@@ -210,7 +204,6 @@ extension EventSourceAdaptor {
         try await start(url: url, headers: headers)
     }
 }
-#endif
 
 public protocol EventSourceAdaptor: Sendable {
     func start(url: String, headers: [String: String]) async throws
