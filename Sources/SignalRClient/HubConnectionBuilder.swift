@@ -55,8 +55,18 @@ public class HubConnectionBuilder {
         return self
     }
 
-    public func withRetryPolicy(retryPolicy: RetryPolicy) -> HubConnectionBuilder {
+    public func withAtuomaticReconnect() -> HubConnectionBuilder {
+        self.retryPolicy = DefaultRetryPolicy(retryDelays: [0, 2, 10, 30])
+        return self
+    }
+
+    public func withAtuomaticReconnect(retryPolicy: RetryPolicy) -> HubConnectionBuilder {
         self.retryPolicy = retryPolicy
+        return self
+    }
+
+    public func withAtuomaticReconnect(retryDelays: [TimeInterval]) -> HubConnectionBuilder {
+        self.retryPolicy = DefaultRetryPolicy(retryDelays: retryDelays)
         return self
     }
 
@@ -68,7 +78,7 @@ public class HubConnectionBuilder {
         let connection = connection ?? HttpConnection(url: url, options: httpConnectionOptions)
         let logger = Logger(logLevel: logLevel, logHandler: logHandler ?? DefaultLogHandler())
         let hubProtocol = hubProtocol ?? JsonHubProtocol()
-        let retryPolicy = retryPolicy ?? DefaultRetryPolicy(retryDelays: [0, 1, 2])
+        let retryPolicy = retryPolicy ?? DefaultRetryPolicy(retryDelays: []) // No retry by default
 
         return HubConnection(connection: connection,
                              logger: logger,

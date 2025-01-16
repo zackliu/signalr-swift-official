@@ -237,7 +237,7 @@ final class HubConnectionTests: XCTestCase {
         }
     }
 
-    func testReconnect() async throws {
+    func testReconnect_ExceedRetry() async throws {
         hubConnection = HubConnection(
             connection: mockConnection,
             logger: Logger(logLevel: .debug, logHandler: logHandler),
@@ -299,6 +299,165 @@ final class HubConnectionTests: XCTestCase {
         await fulfillment(of: [openExpectations[3]], timeout: 1.0)
 
         // Retry failed
+        await handleCloseTask.value
+        let state = await hubConnection.state()
+        XCTAssertEqual(state, HubConnectionState.Stopped)
+    }
+
+    func testReconnect_Success() async throws {
+        hubConnection = HubConnection(
+            connection: mockConnection,
+            logger: Logger(logLevel: .debug, logHandler: logHandler),
+            hubProtocol: hubProtocol,
+            retryPolicy: DefaultRetryPolicy(retryDelays: [0.1, 0.2]), // Limited retries
+            serverTimeout: nil,
+            keepAliveInterval: nil
+        )
+
+        let sendExpectation = XCTestExpectation(description: "send() should be called")
+        let openExpectations = [
+            XCTestExpectation(description: "onOpen should be called 1"),
+            XCTestExpectation(description: "onOpen should be called 2"),
+            XCTestExpectation(description: "onOpen should be called 3"),
+        ]
+        var sendCount = 0
+        mockConnection.onSend = { data in
+            if (sendCount == 0) {
+                Task { await self.hubConnection.processIncomingData(.string(self.successHandshakeResponse)) } // only success the first time
+            } else if (sendCount == 1) {
+                Task { await self.hubConnection.processIncomingData(.string(self.errorHandshakeResponse)) } // for the first reconnect, it fails
+            } else {
+                Task { await self.hubConnection.processIncomingData(.string(self.successHandshakeResponse)) } // for the second reconnect, it success
+            }
+            sendCount += 1
+            sendExpectation.fulfill()
+        }
+
+        var openCount = 0
+        mockConnection.onStart = {
+            openCount += 1
+            if (openCount <= 3) {
+                openExpectations[openCount - 1].fulfill()
+            }
+        }
+
+        let startTask = Task { try await hubConnection.start() }
+        defer { startTask.cancel() }
+
+        // HubConnect start handshake
+        await fulfillment(of: [sendExpectation], timeout: 1.0)
+
+        // Response a handshake response
+        await whenTaskWithTimeout(startTask, timeout: 1.0)
+
+        // Simulate connection close
+        let handleCloseTask = Task { await hubConnection.handleConnectionClose(error: nil) }
+
+        // retry will work and start will be called again
+        await fulfillment(of: [openExpectations[1]], timeout: 1.0)
+
+        await fulfillment(of: [openExpectations[2]], timeout: 1.0)
+
+        // Retry success
+        await handleCloseTask.value
+        let state = await hubConnection.state()
+        XCTAssertEqual(state, HubConnectionState.Connected)
+    }
+
+    func testReconnect_CustomPolicy() async throws {
+        class CustomRetryPolicy: RetryPolicy, @unchecked Sendable {
+            func nextRetryInterval(retryContext: SignalRClient.RetryContext) -> TimeInterval? {
+                return onRetry?(retryContext)
+            }
+
+            var onRetry: ((RetryContext) -> TimeInterval?)?
+        }
+
+        class CustomError: Error, @unchecked Sendable {}
+        let retryPolicy = CustomRetryPolicy()
+
+        hubConnection = HubConnection(
+            connection: mockConnection,
+            logger: Logger(logLevel: .debug, logHandler: logHandler),
+            hubProtocol: hubProtocol,
+            retryPolicy: retryPolicy, // Limited retries
+            serverTimeout: nil,
+            keepAliveInterval: nil
+        )
+
+        let sendExpectation = XCTestExpectation(description: "send() should be called")
+        var sendCount = 0
+        mockConnection.onSend = { data in
+            if (sendCount == 0) {
+                Task { await self.hubConnection.processIncomingData(.string(self.successHandshakeResponse)) } // only success the first time
+            } else {
+                Task { await self.hubConnection.processIncomingData(.string(self.errorHandshakeResponse)) } // for the first reconnect, it fails
+            }
+            sendCount += 1
+            sendExpectation.fulfill()
+        }
+
+        let startTask = Task { try await hubConnection.start() }
+        defer { startTask.cancel() }
+
+        // HubConnect start handshake
+        await fulfillment(of: [sendExpectation], timeout: 1.0)
+
+        // Response a handshake response
+        await whenTaskWithTimeout(startTask, timeout: 1.0)
+
+        let retryExpectations = [
+            XCTestExpectation(description: "retry should be called 1"),
+            XCTestExpectation(description: "retry should be called 2"),
+            XCTestExpectation(description: "retry should be called 3"),
+        ]
+        var retryCount = 0
+        var previousElaped: TimeInterval = 0
+        retryPolicy.onRetry = { retryContext in
+            if (retryCount == 0) {
+                XCTAssert(retryContext.retryReason is CustomError)
+                XCTAssertEqual(retryContext.elapsed, 0)
+                XCTAssertEqual(retryContext.retryCount, 0)
+            } else {
+                XCTAssertEqual(retryContext.retryCount, retryCount)
+                XCTAssert(previousElaped < retryContext.elapsed)
+                XCTAssert(retryContext.retryReason is SignalRError)
+            }
+            if (retryCount < 3) {
+                retryExpectations[retryCount].fulfill()
+            }
+            retryCount += 1
+            previousElaped = retryContext.elapsed
+            return 0.1
+        }
+
+        let reconnectingExpectations = [
+            XCTestExpectation(description: "reconnecting should be called 1"),
+            XCTestExpectation(description: "reconnecting should be called 2"),
+            XCTestExpectation(description: "reconnecting should be called 3"),
+        ]
+        var reconnectingCount = 0
+        await hubConnection.onReconnecting { error in
+            if (reconnectingCount < 3) {
+                reconnectingExpectations[reconnectingCount].fulfill()
+            }
+            reconnectingCount += 1
+        }
+
+        // Simulate connection close
+        let handleCloseTask = Task { await hubConnection.handleConnectionClose(error: CustomError()) }
+
+        // retry will work and start will be called again
+        await fulfillment(of: [retryExpectations[0]], timeout: 1.0)
+        await fulfillment(of: [reconnectingExpectations[0]], timeout: 1.0)
+        await fulfillment(of: [retryExpectations[1]], timeout: 1.0)
+        await fulfillment(of: [reconnectingExpectations[1]], timeout: 1.0)
+        await fulfillment(of: [retryExpectations[2]], timeout: 1.0)
+        await fulfillment(of: [reconnectingExpectations[2]], timeout: 1.0)
+
+        await hubConnection.stop()
+
+        // Retry success
         await handleCloseTask.value
         let state = await hubConnection.state()
         XCTAssertEqual(state, HubConnectionState.Stopped)
@@ -697,3 +856,4 @@ final class HubConnectionTests: XCTestCase {
         }
     }
 }
+

@@ -21,6 +21,8 @@ public actor HubConnection {
     private var stopDuringStartError: Error?
     nonisolated(unsafe) private var handshakeResolver: ((HandshakeResponseMessage) -> Void)?
     nonisolated(unsafe) private var handshakeRejector: ((Error) -> Void)?
+    private var closedHandlers: [(Error?) async -> Void] = []
+    private var reconnectingHandlers: [(Error?) async -> Void] = []
 
     private var stopTask: Task<Void, Never>?
     private var startTask: Task<Void, Error>?
@@ -178,7 +180,23 @@ public actor HubConnection {
     }
 
     public func onClosed(handler: @escaping (Error?) async -> Void) {
-        // Register a handler for the connection closing
+        closedHandlers.append(handler)
+    }
+
+    private func triggerClosedHandlers(error: Error?) async {
+        for handler in closedHandlers {
+            await handler(error)
+        }
+    }
+
+    public func onReconnecting(handler: @escaping (Error?) async -> Void) {
+        reconnectingHandlers.append(handler)
+    }
+
+    private func triggerReconnectingHandlers(error: Error?) async {
+        for handler in reconnectingHandlers {
+            await handler(error)
+        }
     }
 
     public func state() -> HubConnectionState {
@@ -211,7 +229,7 @@ public actor HubConnection {
         stopDuringStartError = error ?? SignalRError.connectionAborted
 
         if (connectionStatus == .Stopped) {
-            completeClose()
+            await completeClose(error: error)
             return
         }
 
@@ -221,7 +239,7 @@ public actor HubConnection {
         }
 
         if (stopping) {
-            completeClose()
+            await completeClose(error: error)
         }
 
         // Several status possible
@@ -231,17 +249,25 @@ public actor HubConnection {
 
         if (connectionStatus == .Connected) {
             do {
-                try await reconnect()
+                try await reconnect(error: error)
             } catch {
                 logger.log(level: .warning, message: "Connection reconnect failed: \(error)")
             }
         }
     }
 
-    private func reconnect() async throws {
+    internal func reconnect(error: Error?) async throws {
         var retryCount = 0
+        let startTime = DispatchTime.now()
+        var elapsed: TimeInterval = 0.0
+        var lastError: Error? = error
+
         // reconnect
-        while let interval = retryPolicy.nextRetryInterval(retryCount: retryCount) {
+        while let interval = retryPolicy.nextRetryInterval(retryContext: RetryContext(
+                retryCount: retryCount,
+                elapsed: elapsed,
+                retryReason: lastError
+            )) {
             try Task.checkCancellation()
             if (stopping) {
                 break
@@ -249,12 +275,19 @@ public actor HubConnection {
 
             logger.log(level: .debug, message: "Connection reconnecting")
             connectionStatus = .Reconnecting
+            await triggerReconnectingHandlers(error: lastError)
+            if (connectionStatus != .Reconnecting) {
+                logger.log(level: .debug, message: "Connection left the reconnecting state in onreconnecting callback. Done reconnecting.")
+                break
+            }
+
             do {
                 try await startInternal()
                 // DO we need to check status here?
                 connectionStatus = .Connected
                 return
             } catch {
+                lastError = error
                 logger.log(level: .warning, message: "Connection reconnect failed: \(error)")
             }
 
@@ -262,17 +295,18 @@ public actor HubConnection {
                 break
             }
 
-            retryCount += 1
-
             do {
                 try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000)) // interval in seconds to ns
             } catch {
                 break
             }
+
+            retryCount += 1
+            elapsed = Double(DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000
         }
 
         logger.log(level: .warning, message: "Connection reconnect exceeded retry policy")
-        completeClose()
+        await completeClose(error: lastError)
     }
 
     // Internal for testing
@@ -350,9 +384,10 @@ public actor HubConnection {
         }
     }
 
-    private func completeClose() {
+    private func completeClose(error: Error?) async {
         connectionStatus = .Stopped
         stopping = false
+        await triggerClosedHandlers(error: error)
     }
 
     private func startInternal() async throws {
