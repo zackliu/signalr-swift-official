@@ -28,7 +28,10 @@ final class HubConnectionOnTests: XCTestCase {
         )
 
         mockConnection.onSend = { data in
-            Task { await self.hubConnection.processIncomingData(.string(self.successHandshakeResponse)) } // only success the first time
+            Task { 
+                guard let hubConnection = self.hubConnection else { return }
+                await hubConnection.processIncomingData(.string(self.successHandshakeResponse)) 
+            } // only success the first time
         }
 
         try await hubConnection.start()

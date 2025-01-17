@@ -12,6 +12,7 @@ public actor HubConnection {
     private let hubProtocol: HubProtocol
     private let connection: ConnectionProtocol
     private let retryPolicy: RetryPolicy
+    private let keepAliveScheduler: TimeScheduler
 
     private var connectionStarted: Bool = false
     private var receivedHandshakeResponse: Bool = false
@@ -43,6 +44,7 @@ public actor HubConnection {
 
         self.invocationBinder = DefaultInvocationBinder()
         self.invocationHandler = InvocationHandler()
+        self.keepAliveScheduler = TimeScheduler(initialInterval: self.keepAliveInterval)
     }
 
     public func start() async throws {
@@ -58,11 +60,11 @@ public actor HubConnection {
                 await self.connection.onReceive(processIncomingData)
 
                 try await startInternal()
-                connectionStatus = .Connected
                 logger.log(level: .debug, message: "HubConnection started")
             } catch {
                 connectionStatus = .Stopped
                 stopping = false
+                await keepAliveScheduler.stop()
                 logger.log(level: .debug, message: "HubConnection start failed \(error)")
                 throw error
             }
@@ -283,8 +285,6 @@ public actor HubConnection {
 
             do {
                 try await startInternal()
-                // DO we need to check status here?
-                connectionStatus = .Connected
                 return
             } catch {
                 lastError = error
@@ -387,6 +387,7 @@ public actor HubConnection {
     private func completeClose(error: Error?) async {
         connectionStatus = .Stopped
         stopping = false
+        await keepAliveScheduler.stop()
         await triggerClosedHandlers(error: error)
     }
 
@@ -400,6 +401,8 @@ public actor HubConnection {
         logger.log(level: .debug, message: "Starting HubConnection")
 
         stopDuringStartError = nil
+        await keepAliveScheduler.stop() // make sure to stop the keepalive scheduler
+
         try await connection.start(transferFormat: hubProtocol.transferFormat)
 
         // After connection open, perform handshake
@@ -444,10 +447,29 @@ public actor HubConnection {
                 }
             }
 
+            let inherentKeepAlive = await connection.inherentKeepAlive
+            if (!inherentKeepAlive) {
+                await keepAliveScheduler.start {
+                    do {
+                        let state = self.state()
+                        if (state == .Connected) {
+                            try await self.sendPing()
+                        }
+                    } catch {
+                        self.logger.log(level: .debug, message: "Error sending ping: \(error)") // We don't care about this error
+                    }
+                }
+            }
+
             guard stopDuringStartError == nil else {
                 throw stopDuringStartError!
             }
 
+            // IMPORTANT: There should be no async code start from here. Otherwise, we may lost the control of the connection lifecycle
+            // Either the error throw by stopDuringStartError, either it's connected status so `handleConnectionClose` can call reconnect there.
+
+            connectionStatus = .Connected
+            
             logger.log(level: .debug, message: "Handshake completed")
         } catch {
             logger.log(level: .error, message: "Handshake failed: \(error)")
@@ -456,7 +478,7 @@ public actor HubConnection {
     }
 
     private func sendMessageInternal(_ content: StringOrData) async throws {
-        // Reset keepalive timer
+        await resetKeepAlive()
         try await connection.send(content)
     }
 
@@ -483,6 +505,22 @@ public actor HubConnection {
 
         handshakeResolver!(handshakeResponse)
         return remainingData
+    }
+
+    private func resetKeepAlive() async {
+        let inherentKeepAlive = await connection.inherentKeepAlive
+        if (inherentKeepAlive) {
+            await keepAliveScheduler.stop()
+            return
+        }
+
+        await keepAliveScheduler.refreshSchduler()
+    }
+
+    private func sendPing() async throws {
+        let pingMessage = PingMessage()
+        let data = try hubProtocol.writeMessage(message: pingMessage)
+        try await sendMessageInternal(data)
     }
 
     private class SubscriptionEntity {
