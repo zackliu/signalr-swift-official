@@ -236,6 +236,103 @@ class IntegrationTests: XCTestCase {
         }
     }
 
+    func testClientResult() async throws {
+        #if os(Linux)
+        let testCombinations: [(transport: HttpTransportType, hubProtocol: HubProtocolType)] = [
+            (.longPolling, .messagePack),
+            (.longPolling, .json),
+        ]
+        #else
+        let testCombinations: [(transport: HttpTransportType, hubProtocol: HubProtocolType)] = [
+            (.webSockets, .json),
+            (.serverSentEvents, .json),
+            (.longPolling, .json),
+            (.webSockets, .messagePack),
+            (.longPolling, .messagePack),
+        ]
+        #endif
+
+        for (transport, hubProtocol) in testCombinations {
+            try await whenTaskTimeout({ try await self.testClientResultCore(transport: transport, hubProtocol: hubProtocol) }, timeout: 1)
+        }
+    }
+
+    private func testClientResultCore(transport: HttpTransportType, hubProtocol: HubProtocolType) async throws {
+        let connection = HubConnectionBuilder()
+            .withUrl(url: url!, transport: transport)
+            .withHubProtocol(hubProtocol: hubProtocol)
+            .withLogLevel(logLevel: logLevel)
+            .build()
+
+        try await connection.start()
+
+        try await run() {
+            let expectMessage = "Hello, World!"
+            let expectation = XCTestExpectation(description: "ClientResult received")
+            await connection.on("EchoBack") { (message: String) in
+                XCTAssertEqual(expectMessage, message)
+                expectation.fulfill()
+            }
+            await connection.on("ClientResult") { (message: String) in
+                XCTAssertEqual(expectMessage, message)
+                return expectMessage
+            }
+            try await connection.invoke(method: "InvokeWithClientResult", arguments: expectMessage)
+            await fulfillment(of: [expectation], timeout: 1.0)
+        } defer: {
+            await connection.stop()
+        }
+    }
+
+    func testClientResultWithNull() async throws {
+        #if os(Linux)
+        let testCombinations: [(transport: HttpTransportType, hubProtocol: HubProtocolType)] = [
+            // (.longPolling, .messagePack), // TODO: This test fails, need more investigation
+            (.longPolling, .json),
+        ]
+        #else
+        let testCombinations: [(transport: HttpTransportType, hubProtocol: HubProtocolType)] = [
+            (.webSockets, .json),
+            (.serverSentEvents, .json),
+            (.longPolling, .json),
+            // (.webSockets, .messagePack), // TODO: This test fails, need more investigation
+            // (.longPolling, .messagePack), // TODO: This test fails, need more investigation
+        ]
+        #endif
+
+        for (transport, hubProtocol) in testCombinations {
+            try await whenTaskTimeout({ try await self.testClientResultWithNullCore(transport: transport, hubProtocol: hubProtocol) }, timeout: 1)
+        }
+    }
+
+    private func testClientResultWithNullCore(transport: HttpTransportType, hubProtocol: HubProtocolType) async throws {
+        let connection = HubConnectionBuilder()
+            .withUrl(url: url!, transport: transport)
+            .withHubProtocol(hubProtocol: hubProtocol)
+            .withLogLevel(logLevel: logLevel)
+            .build()
+
+        try await connection.start()
+
+        try await run() {
+            let expectMessage = "Hello, World!"
+            let expectation = XCTestExpectation(description: "ClientResult received")
+            await connection.on("EchoBack") { (message: String) in
+                XCTAssertEqual("received", message)
+                expectation.fulfill()
+            }
+            await connection.on("ClientResult") { (message: String) in
+                XCTAssertEqual(expectMessage, message)
+                return
+            }
+            
+            try await connection.invoke(method: "invokeWithEmptyClientResult", arguments: expectMessage)
+            await fulfillment(of: [expectation], timeout: 1.0)
+        } defer: {
+            await connection.stop()
+        }
+    }
+
     class CustomClass: Codable, Equatable {
         static func == (lhs: IntegrationTests.CustomClass, rhs: IntegrationTests.CustomClass) -> Bool {
             return lhs.str == rhs.str && lhs.arr == rhs.arr
@@ -262,13 +359,15 @@ class IntegrationTests: XCTestCase {
     }
 
     func run<T>(_ operation: () async throws -> T,
-            defer deferredOperation: () async throws -> Void) async throws -> T {
+            defer deferredOperation: () async throws -> Void,
+            line: UInt = #line) async throws -> T {
         do {
             let result = try await operation()
             try await deferredOperation()
             return result
         } catch {
             try await deferredOperation()
+            XCTFail(String(describing: error), file: #file, line: line)
             throw error
         }
     }

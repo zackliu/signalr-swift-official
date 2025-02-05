@@ -103,6 +103,7 @@ public actor HubConnection {
     public func send(method: String, arguments: Any...) async throws {
         let invocationMessage = InvocationMessage(target: method, arguments: AnyEncodableArray(arguments), streamIds: nil, headers: nil, invocationId: nil)
         let data = try hubProtocol.writeMessage(message: invocationMessage)
+        logger.log(level: .debug, message: "Sending message to target: \(method)")
         try await sendMessageInternal(data)
     }
 
@@ -110,6 +111,7 @@ public actor HubConnection {
         let (invocationId, tcs) = await invocationHandler.create()
         let invocationMessage = InvocationMessage(target: method, arguments: AnyEncodableArray(arguments), streamIds: nil, headers: nil, invocationId: invocationId)
         let data = try hubProtocol.writeMessage(message: invocationMessage)
+        logger.log(level: .debug, message: "Invoke message to target: \(method), invocationId: \(invocationId)")
         try await sendMessageInternal(data)
         _ = try await tcs.task()
     }
@@ -120,6 +122,7 @@ public actor HubConnection {
         let invocationMessage = InvocationMessage(target: method, arguments: AnyEncodableArray(arguments), streamIds: nil, headers: nil, invocationId: invocationId)
         do {
             let data = try hubProtocol.writeMessage(message: invocationMessage)
+            logger.log(level: .debug, message: "Invoke message to target: \(method), invocationId: \(invocationId)")
             try await sendMessageInternal(data)
         } catch {
             await invocationHandler.cancel(invocationId: invocationId, error: error)
@@ -140,6 +143,7 @@ public actor HubConnection {
         let StreamInvocationMessage = StreamInvocationMessage(invocationId: invocationId, target: method, arguments: AnyEncodableArray(arguments), streamIds: nil, headers: nil)
         do {
             let data = try hubProtocol.writeMessage(message: StreamInvocationMessage)
+            logger.log(level: .debug, message: "Stream message to target: \(method), invocationId: \(invocationId)")
             try await sendMessageInternal(data)
         } catch {
             await invocationHandler.cancel(invocationId: invocationId, error: error)
@@ -177,6 +181,10 @@ public actor HubConnection {
     }
 
     internal func on(method: String, types: [Any.Type], handler: @escaping ([Any]) async throws -> Void) {
+        invocationBinder.registerSubscription(methodName: method, types: types, handler: handler)
+    }
+
+    internal func on(method: String, types: [Any.Type], handler: @escaping ([Any]) async throws -> Any) {
         invocationBinder.registerSubscription(methodName: method, types: types, handler: handler)
     }
 
@@ -351,41 +359,63 @@ public actor HubConnection {
         switch message {
             case let message as InvocationMessage:
                 // Invoke a method
-                if let handler = invocationBinder.getHandler(methodName: message.target) {
-                    do {
-                        try await handler(message.arguments.value ?? [])
-                    } catch {
-                        logger.log(level: .error, message: "Error invoking method: \(error)")
-                    }
+                logger.log(level: .debug, message: "Invocation message received for method: \(message.target)")
+                do {
+                    try await invokeClientMethod(message: message)
+                } catch {
+                    logger.log(level: .error, message: "Error invoking method: \(error)")
                 }
                 break
             case let message as StreamItemMessage:
+                logger.log(level: .debug, message: "Stream item message received for invocation: \(message.invocationId!)")
                 await invocationHandler.setStreamItem(message: message)
                 break
             case let message as CompletionMessage:
+                logger.log(level: .debug, message: "Completion message received for invocation: \(message.invocationId!), error: \(message.error ?? "nil"), result: \(message.result.value ?? "nil")")
                 await invocationHandler.setResult(message: message)
                 invocationBinder.removeReturnValueType(invocationId: message.invocationId!)
                 break
-            case _ as StreamInvocationMessage:
-                // Never happened in client
-                break
-            case _ as CancelInvocationMessage:
-                // Never happened in client
-                break
             case _ as PingMessage:
-                // Ping
+                // Don't care about the content of ping
                 break
             case _ as CloseMessage:
                 // Close
                 break
             case _ as AckMessage:
-                // Ack
+                // TODO: In stateful reconnect
                 break
             case _ as SequenceMessage:
-                // Sequence
+                // TODO: In stateful reconnect
                 break
             default:
                 logger.log(level: .warning, message: "Unknown message type: \(message)")
+        }
+    }
+
+    private func invokeClientMethod(message: InvocationMessage) async throws {
+        guard let handler = invocationBinder.getHandler(methodName: message.target) else {
+            logger.log(level: .warning, message: "No handler registered for method: \(message.target)")
+            if let invocationId = message.invocationId {
+                logger.log(level:.warning, message: "No result given for method: \(message.target), and invocationId: \(invocationId)")
+                let completionMessage = CompletionMessage(invocationId: invocationId, error: "No handler registered for method: \(message.target)", result: AnyEncodable(nil), headers: nil)
+                let data = try hubProtocol.writeMessage(message: completionMessage)
+                try await sendMessageInternal(data)
+            }
+            return            
+        }
+        
+        let expectResponse = message.invocationId != nil
+        if (expectResponse) {
+            var result: Any? = try await handler(message.arguments.value ?? [])
+            if (result is Void) {
+                // Void is not encodeable
+                result = nil
+            }
+            let completionMessage = CompletionMessage(invocationId: message.invocationId!, error: nil, result: AnyEncodable(result), headers: nil)
+            let data = try hubProtocol.writeMessage(message: completionMessage)
+            try await sendMessageInternal(data)
+        } else {
+            _ = try await handler(message.arguments.value ?? [])
         }
     }
 
@@ -536,9 +566,9 @@ public actor HubConnection {
 
     private class SubscriptionEntity {
         public let types: [Any.Type]
-        public let callback: ([Any]) async throws -> Void
+        public let callback: ([Any]) async throws -> Any
 
-        init(types: [Any.Type], callback: @escaping ([Any]) async throws -> Void) {
+        init(types: [Any.Type], callback: @escaping ([Any]) async throws -> Any) {
             self.types = types
             self.callback = callback
         }
@@ -549,7 +579,7 @@ public actor HubConnection {
         private var subscriptionHandlers: [String: SubscriptionEntity] = [:]
         private var returnValueHandler: [String: Any.Type] = [:]
 
-        mutating func registerSubscription(methodName: String, types: [Any.Type], handler: @escaping ([Any]) async throws -> Void) {
+        mutating func registerSubscription(methodName: String, types: [Any.Type], handler: @escaping ([Any]) async throws -> Any) {
             lock.wait()
             defer {lock.signal()}
             subscriptionHandlers[methodName] = SubscriptionEntity(types: types, callback: handler)
@@ -573,7 +603,7 @@ public actor HubConnection {
             returnValueHandler[invocationId] = nil
         }
 
-        func getHandler(methodName: String) -> (([Any]) async throws -> Void)? {
+        func getHandler(methodName: String) -> (([Any]) async throws -> Any)? {
             lock.wait()
             defer {lock.signal()}
             return subscriptionHandlers[methodName]?.callback
