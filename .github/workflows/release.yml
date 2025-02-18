@@ -45,8 +45,8 @@ jobs:
       
       - name: Tag and release
         run: |
-          git config -g user.name "github-actions[bot]"
-          git config -g user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git fetch --tags
           version=${{ steps.get_version.outputs.current_version }}
           TAG="v$version"
