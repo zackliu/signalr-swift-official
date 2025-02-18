@@ -75,7 +75,7 @@ jobs:
           fi
 
       - name: Create Pull Request
-        if: cpr
+        id: cpr
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
