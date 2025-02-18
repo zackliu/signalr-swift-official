@@ -45,16 +45,17 @@ jobs:
       
       - name: Tag and release
         run: |
+          git config -g user.name "github-actions[bot]"
+          git config -g user.email "github-actions[bot]@users.noreply.github.com"
           git fetch --tags
           version=${{ steps.get_version.outputs.current_version }}
           TAG="v$version"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists. Skipping tag and release."
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+          else  
             git tag "$TAG"
             git push origin "$TAG"
+            echo "Released $TAG"
           fi
 
       - name: Create a branch for bumping version
@@ -63,11 +64,15 @@ jobs:
           next=${{ steps.calc_next.outputs.next_version }}
           branch="bump-version-$next"
           echo "branch_name=$branch" >> $GITHUB_OUTPUT
-          git checkout -b "$branch"
-          sed -i "s/\(let PackageVersion = \"\).*\(\"\)/\1$next\2/" Sources/SignalRClient/Version.swift
-          git add Sources/SignalRClient/Version.swift
-          git commit -m "Bump version to $next"
-          git push origin "$branch"
+          if git ls-remote --heads origin "$branch" >/dev/null 2>&1; then
+            echo "Branch $branch already exists. Skipping creating branch."
+          else
+            git checkout -b "$branch"
+            sed -i "s/\(let PackageVersion = \"\).*\(\"\)/\1$next\2/" Sources/SignalRClient/Version.swift
+            git add Sources/SignalRClient/Version.swift
+            git commit -m "Bump version to $next"
+            git push origin "$branch"
+          fi
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v4
