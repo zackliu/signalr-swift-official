@@ -45,7 +45,7 @@ jobs:
       
       - name: Tag and release
         run: |
-          set +x
+          git fetch --tags
           version=${{ steps.get_version.outputs.current_version }}
           TAG="v$version"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
