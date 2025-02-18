@@ -64,7 +64,7 @@ jobs:
           next=${{ steps.calc_next.outputs.next_version }}
           branch="bump-version-$next"
           echo "branch_name=$branch" >> $GITHUB_OUTPUT
-          if git ls-remote --heads origin "$branch" >/dev/null 2>&1; then
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             echo "Branch $branch already exists. Skipping creating branch."
           else
             git checkout -b "$branch"
