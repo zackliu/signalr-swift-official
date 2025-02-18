@@ -69,9 +69,6 @@ jobs:
           else
             git checkout -b "$branch"
             sed -i "s/\(let PackageVersion = \"\).*\(\"\)/\1$next\2/" Sources/SignalRClient/Version.swift
-            git add Sources/SignalRClient/Version.swift
-            git commit -m "Bump version to $next"
-            git push origin "$branch"
           fi
 
       - name: Create Pull Request
