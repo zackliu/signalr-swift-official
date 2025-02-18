@@ -75,7 +75,8 @@ jobs:
           fi
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v4
+        if: cpr
+        uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: ${{ steps.create_branch.outputs.branch_name }}
@@ -83,3 +84,9 @@ jobs:
           title: "Bump version to ${{ steps.calc_next.outputs.next_version }}"
           commit-message: "Bump version to ${{ steps.calc_next.outputs.next_version }}"
           body: "Bump version to ${{ steps.calc_next.outputs.next_version }} after release"
+
+      - name: Check outputs
+        if: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          echo "Pull Request Number - ${{ steps.cpr.outputs.pull-request-number }}"
+          echo "Pull Request URL - ${{ steps.cpr.outputs.pull-request-url }}"
