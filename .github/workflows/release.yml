@@ -68,6 +68,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: ${{ steps.create_branch.outputs.branch_name }}
+          base: main
           title: "Bump version to ${{ steps.calc_next.outputs.next_version }}"
           commit-message: "Bump version to ${{ steps.calc_next.outputs.next_version }}"
           body: "Bump version to ${{ steps.calc_next.outputs.next_version }} after release"
