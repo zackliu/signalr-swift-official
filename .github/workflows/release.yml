@@ -46,10 +46,15 @@ jobs:
       - name: Tag and release
         run: |
           version=${{ steps.get_version.outputs.current_version }}
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v$version"
-          git push origin "v$version"
+          TAG="v$version"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists. Skipping tag and release."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
 
       - name: Create a branch for bumping version
         id: create_branch
