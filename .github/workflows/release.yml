@@ -67,17 +67,16 @@ jobs:
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             echo "Branch $branch already exists. Skipping creating branch."
           else
-            git checkout -b "$branch"
             sed -i "s/\(let PackageVersion = \"\).*\(\"\)/\1$next\2/" Sources/SignalRClient/Version.swift
           fi
 
       - name: Create Pull Request
         id: cpr
-        uses: peter-evans/create-pull-request@v5
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: ${{ steps.create_branch.outputs.branch_name }}
-          base: main
+          delete-branch: true
           title: "Bump version to ${{ steps.calc_next.outputs.next_version }}"
           commit-message: "Bump version to ${{ steps.calc_next.outputs.next_version }}"
           body: "Bump version to ${{ steps.calc_next.outputs.next_version }} after release"
