@@ -6,17 +6,25 @@ on:
 jobs:
   tag-and-bump:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout main
         uses: actions/checkout@v3
         with:
-          ref: main
+          ref: chenyl/fixreleaseaction
+          token: 
 
       - name: Get current version
         id: get_version
         run: |
-          current_version=$(grep 'let PackageVersion' Sources/SignalRClient/Version.swift | sed 's/.*"//;s/".*//')
+          current_version=$(grep 'let PackageVersion' Sources/SignalRClient/Version.swift | sed -n 's/.*let PackageVersion *= *"\([^"]*\)".*/\1/p')
           echo "Current Version: $current_version"
+          if [ -z "$current_version" ]; then
+            echo "Error: current_version is empty. Exiting."
+            exit 1
+          fi
           echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
 
       - name: Get next version
